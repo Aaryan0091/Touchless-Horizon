@@ -12,7 +12,7 @@ The camera preview shows the whole camera frame and its actual resolution. The a
 
 For the most reliable voice result, say **“Touchless Horizon” followed by a command**, such as “Touchless Horizon next” or “Touchless Horizon help,” then pause briefly. Short commands alone are also accepted when the recognizer returns them. The window shows **Heard:** for the recognized words, **Mic signal** for input activity, and **Last action** when it executes a command.
 
-If the control window is frontmost when you give a voice command, it hides itself and sends the command to the app behind it. Say “Touchless Horizon help” to bring the control window back. Commands such as **Next** and **Zoom in** follow the target app's own keyboard shortcuts, so their visible effect depends on the app.
+The controller no longer hides itself when a voice command is recognized. Select the target app before giving navigation, zoom, scroll, open, or close commands. If Touchless Horizon is frontmost, it asks you to select another app instead of changing focus automatically. Say “Touchless Horizon help” to bring the controller forward. Commands such as **Next** and **Zoom in** follow the target app's own keyboard shortcuts, so their visible effect depends on the app.
 
 ## Controls
 
@@ -30,8 +30,9 @@ If the control window is frontmost when you give a voice command, it hides itsel
 | “Switch app” | Command-Tab |
 | “Toggle theme” | Toggle macOS appearance; may request Automation permission |
 | “Help” | Show the control window |
-| “Pause” | Stop gesture tracking; voice remains on |
-| “Resume” | Start gesture tracking again |
+| “Pause” | Pause media in the selected YouTube or Spotify window |
+| “Resume” | Resume media in the selected YouTube or Spotify window |
+| “Pause gestures” / “Resume gestures” | Hold / resume hand control while voice stays enabled |
 
 Gestures and voice can be enabled together. For example, point at an image, then say “zoom in.” The target app decides how its keyboard shortcuts behave. Some protected windows and apps do not accept synthetic input, and dwell clicking depends on the app exposing accessible controls.
 
@@ -53,3 +54,12 @@ The app processes camera frames locally with Apple's Vision hand pose API and us
 
 ### Fist pause / reposition
 Make a fist (at least three fingers curled) to hold the cursor and suppress gesture clicks, dwell, and swipes. Reposition your closed hand, then open at least two fingers for 0.15 seconds. Movement resumes relative to the cursor's current position; it does not return to the old absolute camera position. Missing landmarks keep the pause active. Separate thumb and index before the next pinch click.
+
+### Voice pauses
+After recognized speech, about 1.4 seconds of quiet clears the transcript and starts a fresh recognition session while voice remains enabled. Unchanged partial-result updates do not extend the old transcript. Brief pauses keep the current phrase; low-level room noise does not prevent refreshing. Command deduplication prevents partial/final recognition updates from replaying the same action.
+
+Voice “resume gestures” releases voice pause and an existing fist pause. Open your hand to continue; a newly detected fist still pauses normally. Capitalization of recognized pause/resume text has no effect. Start voice must be enabled to hear either command.
+
+Media: select the Spotify window or a YouTube video tab, then say “pause” or “resume.” These press the labelled player control only when needed. Use “pause gestures” and “resume gestures” for hand control. The player must expose English Play/Pause accessibility labels.
+
+Speech commands wait for about 0.55 seconds of unchanged recognition text (or a final result) before executing, allowing multiword commands such as “pause gestures” to finish.

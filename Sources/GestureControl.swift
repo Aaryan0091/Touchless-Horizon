@@ -376,3 +376,13 @@ struct PointerClutch {
         return output
     }
 }
+
+/// Voice pause is latched independently of the camera's fist posture.
+struct GesturePauseState {
+    private(set) var voicePaused = false
+    private(set) var fistPaused = false
+    var paused: Bool { voicePaused || fistPaused }
+    mutating func setFist(_ value: Bool) { fistPaused = value }
+    mutating func pause() { voicePaused = true }
+    mutating func resume() { voicePaused = false; fistPaused = false }
+}

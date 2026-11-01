@@ -29,6 +29,8 @@ private final class PointerController {
     var dwellDuration: TimeInterval = 1.2
     private var engine = GesturePointerEngine()
     private var clutch = PointerClutch()
+    private var pauseState = GesturePauseState()
+    var voicePaused: Bool { pauseState.voicePaused }
     private var anchor: CGPoint?
     private var dwellElement: AXUIElement?
     private var dwellBlockedPoint: CGPoint?
@@ -41,6 +43,7 @@ private final class PointerController {
     func reset() {
         engine.reset()
         clutch = PointerClutch()
+        pauseState = GesturePauseState()
         dwellBlockedPoint = nil
         resetDwell()
         swipeStart = nil
@@ -56,13 +59,30 @@ private final class PointerController {
 
     func setClutched(_ paused: Bool) {
         guard enabled else { return }
+        pauseState.setFist(paused)
+        applyPauseState()
+    }
+
+    func pauseByVoice() {
+        pauseState.pause()
+        applyPauseState()
+    }
+
+    func resumeByVoice() {
+        pauseState.resume()
+        applyPauseState()
+    }
+
+    private func applyPauseState() {
+        let paused = pauseState.paused
         let changed = clutch.paused != paused
         clutch.setPaused(paused)
         if paused || changed {
             engine.reset()
             swipeStart = nil
             resetDwell()
-            pinchFeedback?(paused ? "Fist — pointer paused; open hand to resume" : "Resumed here — separate fingertips before clicking")
+            pinchFeedback?(pauseState.voicePaused ? "Voice paused — say resume gestures; microphone stays on" :
+                paused ? "Fist — pointer paused; open hand to resume" : "Resumed here — separate fingertips before clicking")
         }
     }
 
@@ -164,15 +184,20 @@ private final class PointerController {
         }
     }
 
-    func clickCurrent() {
+    func clickCurrent(count: Int = 1) {
         guard AXIsProcessTrusted() else { return }
-        click(at: CGEvent(source: nil)?.location ?? engine.position ?? .zero)
+        click(at: CGEvent(source: nil)?.location ?? engine.position ?? .zero, count: count)
         feedback?("Voice click")
     }
 
-    private func click(at point: CGPoint) {
-        CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
-        CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+    private func click(at point: CGPoint, count: Int = 1) {
+        for clickNumber in 1...max(1, min(count, 2)) {
+            for type in [CGEventType.leftMouseDown, .leftMouseUp] {
+                let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)
+                event?.setIntegerValueField(.mouseEventClickState, value: Int64(clickNumber))
+                event?.post(tap: .cghidEventTap)
+            }
+        }
         NSSound.beep()
     }
 
@@ -238,6 +263,10 @@ private final class CameraTracker: NSObject, AVCaptureVideoDataOutputSampleBuffe
     override init() {
         super.init()
         request.maximumHandCount = 2
+    }
+
+    func clearFistPause() {
+        queue.async { self.fistGate = FistGate() }
     }
 
     func makePreviewLayer() -> AVCaptureVideoPreviewLayer {
@@ -438,14 +467,17 @@ private final class VoiceController {
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var rotationTimer: Timer?
+    private var silenceTimer: Timer?
+    private var silenceBoundary = VoiceSilenceBoundary()
+    private var utteranceSettler = SpeechUtteranceSettler()
     private var enabled = false
     private var restarting = false
     private var generation = 0
-    private var lastHandledText = ""
-    private var lastHandledAt = Date.distantPast
+    private var commandGate = VoiceCommandGate()
+    private var recognitionID = UUID()
     private var lastLevelPublish = Date.distantPast
     private var preferOnDevice = true
-    private let commands = ["toggle theme", "switch app", "zoom in", "zoom out",
+    private let commands = ["pause gestures", "resume gestures", "toggle theme", "switch app", "zoom in", "zoom out",
                             "scroll down", "scroll up", "double click", "previous",
                             "resume", "next", "click", "open", "close", "help", "pause"]
 
@@ -507,6 +539,9 @@ private final class VoiceController {
     }
 
     private func cleanup() {
+        recognitionID = UUID()
+        silenceTimer?.invalidate()
+        silenceTimer = nil
         rotationTimer?.invalidate()
         rotationTimer = nil
         if engine.isRunning { engine.stop() }
@@ -531,6 +566,11 @@ private final class VoiceController {
         request.contextualStrings = commands
         if preferOnDevice && recognizer.supportsOnDeviceRecognition { request.requiresOnDeviceRecognition = true }
         self.request = request
+        let sessionID = UUID()
+        recognitionID = sessionID
+        silenceBoundary = VoiceSilenceBoundary()
+        utteranceSettler = SpeechUtteranceSettler()
+        commandGate = VoiceCommandGate()
         engine.inputNode.removeTap(onBus: 0)
         engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self, weak request] buffer, _ in
             request?.append(buffer)
@@ -543,7 +583,11 @@ private final class VoiceController {
             var sum: Float = 0
             for i in 0..<count { sum += channel[i] * channel[i] }
             let level = min(Double(sqrt(sum / Float(count))) * 8, 1)
-            DispatchQueue.main.async { self.onInputLevel?(level) }
+            DispatchQueue.main.async {
+                guard self.enabled, self.recognitionID == sessionID else { return }
+                self.onInputLevel?(level)
+                self.silenceBoundary.audio(level: level, time: ProcessInfo.processInfo.systemUptime)
+            }
         }
         engine.prepare()
         do { try engine.start() }
@@ -552,11 +596,18 @@ private final class VoiceController {
         onStatus?("Listening — say “help” or “next”")
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
             DispatchQueue.main.async {
-                guard let self, self.enabled else { return }
+                guard let self, self.enabled, self.recognitionID == sessionID else { return }
                 if let result {
                     let phrase = result.bestTranscription.formattedString
+                    self.silenceBoundary.heard(phrase, time: ProcessInfo.processInfo.systemUptime)
                     self.onStatus?("Heard: \(String(phrase.suffix(48)))")
-                    self.handle(phrase)
+                    let words = result.bestTranscription.segments.map {
+                        VoiceWord(text: $0.substring, start: $0.timestamp, duration: $0.duration)
+                    }
+                    self.utteranceSettler.update(phrase: phrase, words: words,
+                        time: ProcessInfo.processInfo.systemUptime)
+                    self.dispatchSettledCommand(final: result.isFinal)
+                    if self.restarting { return }
                 }
                 if let error {
                     if self.preferOnDevice && recognizer.supportsOnDeviceRecognition {
@@ -571,9 +622,25 @@ private final class VoiceController {
                 }
             }
         }
+        silenceTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self, self.enabled, !self.restarting else { return }
+            self.dispatchSettledCommand()
+            guard !self.restarting else { return }
+            if self.silenceBoundary.shouldRefresh(time: ProcessInfo.processInfo.systemUptime) {
+                self.onStatus?("Listening — ready for a new command")
+                self.restart(after: 0.05)
+            }
+        }
         rotationTimer = Timer.scheduledTimer(withTimeInterval: 45, repeats: false) { [weak self] _ in
             self?.restart(after: 0.35)
         }
+    }
+
+    private func dispatchSettledCommand(final: Bool = false) {
+        guard let words = utteranceSettler.takeReady(time: ProcessInfo.processInfo.systemUptime, final: final),
+              let command = commandGate.command(in: words, commands: commands) else { return }
+        onCommand?(command)
+        if command == "pause" || command == "resume" { restart(after: 0.15) }
     }
 
     private func restart(after delay: TimeInterval) {
@@ -588,19 +655,7 @@ private final class VoiceController {
         }
     }
 
-    private func handle(_ phrase: String) {
-        let normalized = phrase.lowercased()
-            .components(separatedBy: CharacterSet.letters.union(.whitespaces).inverted)
-            .joined()
-            .split(whereSeparator: { $0.isWhitespace })
-            .joined(separator: " ")
-        guard let command = commands.first(where: { normalized == $0 || normalized.hasSuffix(" " + $0) }) else { return }
-        let now = Date()
-        guard normalized != lastHandledText || now.timeIntervalSince(lastHandledAt) > 1.5 else { return }
-        lastHandledText = normalized
-        lastHandledAt = now
-        onCommand?(command)
-    }
+
 }
 
 private final class DwellOverlay: NSPanel {
@@ -662,13 +717,13 @@ private final class AppController: NSObject, NSApplicationDelegate {
         buildWindow()
         camera.onHand = { [weak self] hand in
             guard let self else { return }
-            if self.gestureOn { self.cameraLabel.stringValue = hand == nil ? "Camera active • searching for hand" : "Camera active • hand tracked" }
+            if self.gestureOn && !self.pointer.voicePaused { self.cameraLabel.stringValue = hand == nil ? "Camera active • searching for hand" : "Camera active • hand tracked" }
             self.pointer.update(hand)
         }
         camera.onClutch = { [weak self] paused in
             guard let self, self.gestureOn else { return }
             self.pointer.setClutched(paused)
-            if paused { self.cameraLabel.stringValue = "Camera active • FIST PAUSE — open hand to resume" }
+            if paused && !self.pointer.voicePaused { self.cameraLabel.stringValue = "Camera active • FIST PAUSE — open hand to resume" }
         }
         camera.onStatus = { [weak self] status in self?.cameraLabel.stringValue = status }
         camera.onFormat = { [weak self] width, height in
@@ -676,6 +731,7 @@ private final class AppController: NSObject, NSApplicationDelegate {
         }
         camera.onUncertain = { [weak self] fingertipsOnly in
             guard let self, self.gestureOn else { return }
+            if self.pointer.voicePaused { return }
             self.cameraLabel.stringValue = fingertipsOnly ?
                 "Camera active • palm tracked, fingertip unclear" : "Camera active • brief gap, pointer held"
             self.pointer.pauseTracking(fingertipsOnly: fingertipsOnly)
@@ -780,7 +836,7 @@ private final class AppController: NSObject, NSApplicationDelegate {
             return field
         }
         _ = label("TOUCHLESS HORIZON", size: 28, color: mint, y: 533, height: 38)
-        _ = label("Voice commands act on the app behind this window", size: 15, color: .white, y: 504)
+        _ = label("Select the app you want voice commands to control", size: 15, color: .white, y: 504)
         accessLabel = label("Checking Accessibility…", size: 13, color: .systemYellow, y: 479)
         settingsButton = NSButton(title: "Open Device Control Settings", target: self, action: #selector(openAccessibilitySettings))
         settingsButton.frame = NSRect(x: 34, y: 442, width: 235, height: 30)
@@ -815,7 +871,7 @@ private final class AppController: NSObject, NSApplicationDelegate {
         _ = label("Hover clicks and swipes are off until you enable them", size: 12, color: .lightGray, y: 133)
         _ = label("VOICE", size: 14, color: mint, y: 90)
         _ = label("Say: next, previous, zoom in/out, click, scroll, open, close", size: 13, color: .white, y: 63)
-        _ = label("switch app, toggle theme, pause, resume, help", size: 13, color: .white, y: 40)
+        _ = label("pause/resume media • pause/resume gestures • help", size: 13, color: .white, y: 40)
     }
 
     private func refreshAccess() {
@@ -891,32 +947,40 @@ private final class AppController: NSObject, NSApplicationDelegate {
     private func run(_ command: String) {
         refreshAccess()
         if command == "help" { showWindow(); announce("Voice: help"); return }
-        if command == "pause" {
-            if gestureOn { toggleGestures() }
-            announce("Gestures paused")
+        if command == "pause gestures" {
+            pointer.pauseByVoice()
+            cameraLabel.stringValue = gestureOn ? "Camera active • VOICE PAUSED — say resume gestures" : "Gestures paused — say resume gestures to start"
+            announce("Voice: pause gestures — gestures held; voice stays listening")
             return
         }
-        if command == "resume" {
+        if command == "resume gestures" {
             if !gestureOn { toggleGestures() }
-            announce("Gestures resumed")
+            camera.clearFistPause()
+            pointer.resumeByVoice()
+            cameraLabel.stringValue = "Camera active • resuming — open your hand"
+            announce("Voice: resume gestures — gesture control enabled")
             return
         }
         guard AXIsProcessTrusted() else {
             announce("Heard \(command), but Accessibility is OFF")
             return
         }
-        if NSApp.isActive && command != "switch app" && command != "toggle theme" {
-            NSApp.hide(nil)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-                self?.execute(command)
-            }
-        } else {
-            execute(command)
+        // Keep the controller visible. Keyboard shortcuts should only go to an
+        // app the user explicitly focused, never hide this window to pick one.
+        let needsExternalApp = ["next", "previous", "zoom in", "zoom out",
+                                "scroll down", "scroll up", "open", "close"]
+        if NSApp.isActive && needsExternalApp.contains(command) {
+            announce("Select the app to control, then say “\(command)”")
+            return
         }
+        execute(command)
     }
 
     private func execute(_ command: String) {
         switch command {
+        case "pause", "resume":
+            announce(MediaPlayback.perform(command))
+            return
         case "next": KeySender.press(.rightArrow)
         case "previous": KeySender.press(.leftArrow)
         case "zoom in": KeySender.press(.equal, modifiers: .maskCommand)
@@ -924,7 +988,7 @@ private final class AppController: NSObject, NSApplicationDelegate {
         case "scroll down": KeySender.scroll(-5)
         case "scroll up": KeySender.scroll(5)
         case "click": pointer.clickCurrent()
-        case "double click": pointer.clickCurrent(); pointer.clickCurrent()
+        case "double click": pointer.clickCurrent(count: 2)
         case "open": KeySender.press(.o, modifiers: .maskCommand)
         case "close": KeySender.press(.w, modifiers: .maskCommand)
         case "switch app": KeySender.press(.tab, modifiers: .maskCommand)
