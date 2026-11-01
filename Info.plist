@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleExecutable</key><string>TouchlessHorizon</string>
+  <key>CFBundleIdentifier</key><string>com.touchlesshorizon.app</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>Touchless Horizon</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSCameraUsageDescription</key><string>Track your hand to control the pointer without touching the laptop.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Listen for touchless voice commands while control is enabled.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Recognize spoken commands for laptop control.</string>
+  <key>LSUIElement</key><false/>
+</dict></plist>
